@@ -1,0 +1,45 @@
+# ==========================================
+# BalAarogya - Vitamin-D Module
+# Core Development Dependencies
+# ==========================================
+
+# Data & Scientific Computing
+numpy
+pandas
+scipy
+
+# Machine Learning
+scikit-learn
+xgboost
+
+# Visualization & EDA
+matplotlib
+seaborn
+
+# Model Explainability
+shap
+
+# Data / File Handling
+openpyxl
+pyarrow
+
+# Development & Experimentation
+jupyter
+joblib
+
+# Computer Vision
+opencv-python
+Pillow
+mediapipe
+
+# Deep Learning
+# torch
+# torchvision
+
+# Backend / API
+fastapi
+uvicorn
+python-multipart
+
+# Configuration
+python-dotenv
