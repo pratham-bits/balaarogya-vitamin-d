@@ -2,13 +2,15 @@
 # BalAarogya - Vitamin-D Module
 # Git Ignore
 # ==========================================
-
+/BalAarogya_3R3_implementation
+/BalAarogya_3R4_implementation
+/BalAarogya_4_4_baseline_ml
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-
+openapi_schemas.txt
 # Virtual Environment
 .venv/
 venv/

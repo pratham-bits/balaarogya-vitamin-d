@@ -43,3 +43,5 @@ python-multipart
 
 # Configuration
 python-dotenv
+
+python-multipart
