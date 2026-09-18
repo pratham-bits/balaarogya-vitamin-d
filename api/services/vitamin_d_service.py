@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# pyright: reportMissingImports=false
 from typing import Any, Callable
 
 import numpy as np
@@ -9,6 +10,7 @@ from api.schemas.inference import (
     VitaminDInferenceRequest,
     VitaminDInferenceResponse,
 )
+from api.services.vitamin_d_postprocessing import postprocess_prediction
 from src.data.india_schema import IndianVitaminDRecord
 from src.features.multimodal_assembler import (
     assemble_multimodal_features,
@@ -33,12 +35,22 @@ class VitaminDInferenceService:
     """
     Orchestrates Vitamin-D inference.
 
-    The service does not contain clinical thresholds or clinical
-    decision rules. Those belong to a separately validated model/
-    decision layer.
+    The service performs:
+        request validation
+        -> optional optical assessment
+        -> canonical multimodal feature assembly
+        -> current API-baseline model inference
+        -> post-processing of the model prediction
+        -> API response
 
-    If model artifact metadata is available, the service also enforces
-    the age range represented by that training artifact.
+    The underlying regression model is not modified here.
+
+    Important:
+    - The current model is an NHANES-trained development baseline.
+    - The current model uses age, weight, and sex.
+    - The multimodal representation is assembled for future use.
+    - Risk classification and recommendation are handled by the separate
+      post-processing layer.
     """
 
     def __init__(
@@ -60,13 +72,24 @@ class VitaminDInferenceService:
         """
         Assess one child.
 
-        If no validated model is available, return an explicit
-        unable_to_assess response rather than generating a fabricated
-        prediction.
+        The existing regression model produces a continuous 25(OH)D
+        prediction. That raw prediction is then passed to the independent
+        post-processing layer, which generates the current prototype's:
 
-        If artifact metadata is available, the child's age must fall
-        within the training age range recorded in that metadata.
+            - rounded predicted 25(OH)D
+            - risk category
+            - risk label
+            - recommendation
+            - contextual uncertainty
+            - qualitative contributing factors
+
+        The current model does NOT produce a calibrated risk probability,
+        therefore risk_probability remains None.
         """
+
+        # ------------------------------------------------------------------
+        # Validate request type
+        # ------------------------------------------------------------------
 
         if not isinstance(
             request,
@@ -75,6 +98,10 @@ class VitaminDInferenceService:
             raise TypeError(
                 "request must be a VitaminDInferenceRequest."
             )
+
+        # ------------------------------------------------------------------
+        # Model availability
+        # ------------------------------------------------------------------
 
         if self.model is None:
             return VitaminDInferenceResponse(
@@ -87,6 +114,10 @@ class VitaminDInferenceService:
                 ),
             )
 
+        # ------------------------------------------------------------------
+        # Training age-range validation
+        # ------------------------------------------------------------------
+
         age_validation_response = (
             self._validate_training_age_range(request)
         )
@@ -94,7 +125,15 @@ class VitaminDInferenceService:
         if age_validation_response is not None:
             return age_validation_response
 
+        # ------------------------------------------------------------------
+        # Build internal Indian record
+        # ------------------------------------------------------------------
+
         record = self._build_record(request)
+
+        # ------------------------------------------------------------------
+        # Optional optical assessment
+        # ------------------------------------------------------------------
 
         optical_assessment = self._get_optical_assessment(
             request
@@ -104,9 +143,12 @@ class VitaminDInferenceService:
             optical_assessment
         )
 
-        # If an image was explicitly provided but the optical
-        # pipeline could not produce usable features, do not
-        # continue with a misleading assessment.
+        # ------------------------------------------------------------------
+        # If an image was explicitly provided but the optical pipeline
+        # could not produce usable features, do not continue with a
+        # potentially misleading assessment.
+        # ------------------------------------------------------------------
+
         if (
             request.image_path is not None
             and optical_status != "acceptable"
@@ -123,24 +165,32 @@ class VitaminDInferenceService:
                 ),
             )
 
-        # Build the canonical Indian multimodal representation.
+        # ------------------------------------------------------------------
+        # Build canonical Indian multimodal representation.
+        #
         # This remains the intended future model input.
+        # ------------------------------------------------------------------
+
         multimodal_features = assemble_multimodal_features(
             record,
             optical_assessment=optical_assessment,
         )
 
-        # Prevent unused-variable warnings while keeping the
-        # canonical multimodal representation available for the
-        # future multimodal model.
+        # Prevent unused-variable warnings while keeping the canonical
+        # multimodal representation available for the future model.
         _ = multimodal_features
 
-        # The currently loaded development artifact is an
-        # NHANES-trained, API-compatible 3-feature baseline.
+        # ------------------------------------------------------------------
+        # Current API baseline model
+        #
+        # The currently loaded development artifact is an NHANES-trained,
+        # API-compatible 3-feature baseline.
         #
         # It does NOT use the complete multimodal representation.
-        # Therefore, adapt the API request explicitly rather than
-        # silently passing 50 columns into a 3-feature model.
+        # Therefore, adapt the API request explicitly rather than silently
+        # passing 50 columns into a 3-feature model.
+        # ------------------------------------------------------------------
+
         features = self._build_api_baseline_features(
             request
         )
@@ -160,22 +210,79 @@ class VitaminDInferenceService:
                 ),
             )
 
+        # ------------------------------------------------------------------
+        # Extract raw regression prediction
+        # ------------------------------------------------------------------
+
         prediction_value = float(
             np.asarray(prediction).reshape(-1)[0]
         )
+
+        # ------------------------------------------------------------------
+        # Post-process raw prediction
+        #
+        # IMPORTANT:
+        # The regression model itself remains completely unchanged.
+        # This layer only converts its output into the current
+        # screening-oriented response fields.
+        # ------------------------------------------------------------------
+
+        postprocessed = postprocess_prediction(
+            request=request,
+            raw_prediction=prediction_value,
+        )
+
+        # ------------------------------------------------------------------
+        # Final response
+        # ------------------------------------------------------------------
 
         return VitaminDInferenceResponse(
             child_id=request.child_id,
             session_id=request.session_id,
             assessment_status="assessed",
             optical_status=optical_status,
-            predicted_25ohd_nmol_l=prediction_value,
-            risk_probability=None,
-            risk_category=None,
-            uncertainty=None,
-            recommendation=None,
+
+            # Rounded to one decimal place by the post-processing layer.
+            predicted_25ohd_nmol_l=(
+                postprocessed.predicted_25ohd_nmol_l
+            ),
+
+            # Current regression model does not provide a calibrated
+            # probability. Keep this explicitly null.
+            risk_probability=(
+                postprocessed.risk_probability
+            ),
+
+            risk_category=(
+                postprocessed.risk_category
+            ),
+
+            risk_label=(
+                postprocessed.risk_label
+            ),
+
+            recommendation=(
+                postprocessed.recommendation
+            ),
+
+            uncertainty={
+                "level": postprocessed.uncertainty.level,
+                "known_field_ratio": (
+                    postprocessed.uncertainty.known_field_ratio
+                ),
+                "message": postprocessed.uncertainty.message,
+            },
+
+            contributing_factors=(
+                postprocessed.contributing_factors
+            ),
+
             message="Assessment completed successfully.",
         )
+
+    # ======================================================================
+    # Current API-baseline feature adapter
+    # ======================================================================
 
     @staticmethod
     def _build_api_baseline_features(
@@ -191,10 +298,10 @@ class VitaminDInferenceService:
 
         Feature mapping:
 
-        age_months -> RIDAGEYR
-        weight_kg  -> BMXWT
-        male       -> RIAGENDR = 1
-        female     -> RIAGENDR = 2
+            age_months -> RIDAGEYR
+            weight_kg  -> BMXWT
+            male       -> RIAGENDR = 1
+            female     -> RIAGENDR = 2
         """
 
         sex_mapping = {
@@ -224,6 +331,10 @@ class VitaminDInferenceService:
             ]
         )
 
+    # ======================================================================
+    # Optical status
+    # ======================================================================
+
     @staticmethod
     def _get_optical_status(
         optical_assessment: OpticalAssessment | None,
@@ -248,6 +359,10 @@ class VitaminDInferenceService:
             return "features_unavailable"
 
         return "acceptable"
+
+    # ======================================================================
+    # Training age validation
+    # ======================================================================
 
     def _validate_training_age_range(
         self,
@@ -290,6 +405,10 @@ class VitaminDInferenceService:
 
         return None
 
+    # ======================================================================
+    # Optical assessment
+    # ======================================================================
+
     def _get_optical_assessment(
         self,
         request: VitaminDInferenceRequest,
@@ -330,6 +449,10 @@ class VitaminDInferenceService:
 
         return None
 
+    # ======================================================================
+    # API request -> internal Indian record
+    # ======================================================================
+
     @staticmethod
     def _build_record(
         request: VitaminDInferenceRequest,
@@ -349,149 +472,175 @@ class VitaminDInferenceService:
         child = request.child
 
         return IndianVitaminDRecord(
-            # ----------------------------------------------------------
+
+            # --------------------------------------------------------------
             # Child profile
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             child_id="api_request",
             assessment_id="api_assessment",
+
             age_months=child.age_months,
             sex=child.sex,
             state=child.state,
             district=child.district,
             residence_type=child.residence_type,
             season=child.season,
+
             household_wealth_quintile=(
                 child.household_wealth_quintile
             ),
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Growth
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             height_cm=(
                 growth.height_cm
                 if growth is not None
                 else None
             ),
+
             weight_kg=(
                 growth.weight_kg
                 if growth is not None
                 else None
             ),
+
             bmi=None,
             height_for_age_z=None,
             weight_for_age_z=None,
             weight_for_height_z=None,
             bmi_for_age_z=None,
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Sun exposure
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             outdoor_time_bucket=(
                 sun.outdoor_time_bucket
                 if sun is not None
                 else None
             ),
+
             outdoor_frequency=(
                 sun.outdoor_frequency
                 if sun is not None
                 else None
             ),
+
             typical_outdoor_time_of_day=(
                 sun.typical_outdoor_time_of_day
                 if sun is not None
                 else None
             ),
+
             clothing_coverage=(
                 sun.clothing_coverage
                 if sun is not None
                 else None
             ),
+
             sun_avoidant_behavior=(
                 sun.sun_avoidant_behavior
                 if sun is not None
                 else None
             ),
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Nutrition
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             diet_type=(
                 nutrition.diet_type
                 if nutrition is not None
                 else None
             ),
+
             dietary_diversity=(
                 nutrition.dietary_diversity
                 if nutrition is not None
                 else None
             ),
+
             vitamin_d_rich_food_frequency=(
                 nutrition.vitamin_d_rich_food_frequency
                 if nutrition is not None
                 else None
             ),
+
             egg_consumption=(
                 nutrition.egg_consumption
                 if nutrition is not None
                 else None
             ),
+
             dairy_consumption=(
                 nutrition.dairy_consumption
                 if nutrition is not None
                 else None
             ),
+
             fortified_food_consumption=(
                 nutrition.fortified_food_consumption
                 if nutrition is not None
                 else None
             ),
+
             complementary_feeding=(
                 nutrition.complementary_feeding
                 if nutrition is not None
                 else None
             ),
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Breastfeeding / early-life factors
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             breastfeeding_status=(
                 breastfeeding.status
                 if breastfeeding is not None
                 else None
             ),
+
             breastfeeding_duration_months=(
                 breastfeeding.duration_months
                 if breastfeeding is not None
                 else None
             ),
+
             maternal_sun_exposure=(
                 breastfeeding.maternal_sun_exposure
                 if breastfeeding is not None
                 else None
             ),
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Supplementation
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             vitamin_d_supplement_use=(
                 supplementation.vitamin_d_use
                 if supplementation is not None
                 else None
             ),
+
             supplement_frequency=(
                 supplementation.frequency
                 if supplementation is not None
                 else None
             ),
+
             recent_supplement_use=(
                 supplementation.recent_use
                 if supplementation is not None
                 else None
             ),
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Optical
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             image_id=request.image_id,
             image_quality=None,
             skin_roi_detected=None,
@@ -501,9 +650,10 @@ class VitaminDInferenceService:
             lab_features=None,
             pigmentation_features=None,
 
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
             # Laboratory ground truth
-            # ----------------------------------------------------------
+            # --------------------------------------------------------------
+
             lab_25ohd_nmol_l=None,
             lab_assay_method=None,
             lab_sample_date=None,

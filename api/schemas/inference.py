@@ -112,6 +112,8 @@ class VitaminDInferenceResponse(BaseModel):
         ge=0,
     )
 
+    # The current regression model does not produce a calibrated probability.
+    # Keep this nullable until a proper probability model is implemented.
     risk_probability: Optional[float] = Field(
         default=None,
         ge=0,
@@ -119,7 +121,15 @@ class VitaminDInferenceResponse(BaseModel):
     )
 
     risk_category: Optional[str] = None
-    uncertainty: Optional[str] = None
+
+    risk_label: Optional[str] = None
+
     recommendation: Optional[str] = None
+
+    uncertainty: Optional[dict] = None
+
+    contributing_factors: list[dict] = Field(
+        default_factory=list,
+    )
 
     message: Optional[str] = None

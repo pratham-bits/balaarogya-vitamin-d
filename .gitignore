@@ -2,6 +2,7 @@
 # BalAarogya - Vitamin-D Module
 # Git Ignore
 # ==========================================
+/local_demo/streamlit_app.py
 /BalAarogya_3R3_implementation
 /BalAarogya_3R4_implementation
 /BalAarogya_4_4_baseline_ml
